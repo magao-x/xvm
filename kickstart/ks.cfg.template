@@ -1,0 +1,135 @@
+# Use CDROM installation media
+cdrom
+$anacondaInstallKind
+eula --agreed
+
+# Set the first NIC to acquire IPv4 address via DHCP
+network --activate --device=link --bootproto=dhcp --hostname=xvm
+# Enable firewall, let SSH through
+firewall --enabled --service=ssh
+
+# Enable all the repositories we'll need:
+# Official Rocky Linux repositories (direct baseurls)
+repo --name="base" --baseurl=https://dl.rockylinux.org/pub/rocky/9/BaseOS/$basearch/os/
+repo --name="appstream" --baseurl=https://dl.rockylinux.org/pub/rocky/9/AppStream/$basearch/os/
+repo --name="crb" --baseurl=https://dl.rockylinux.org/pub/rocky/9/CRB/$basearch/os/
+repo --name="extras" --baseurl=https://dl.rockylinux.org/pub/rocky/9/extras/$basearch/os/
+
+# EPEL and Cisco OpenH264 repos for RHEL-compatible extras
+repo --name="epel" --metalink=https://mirrors.fedoraproject.org/metalink?repo=epel-9&arch=$basearch
+repo --name="epel-cisco-openh264" --metalink=https://mirrors.fedoraproject.org/metalink?repo=epel-cisco-openh264-9&arch=$basearch
+
+# System language, keyboard and timezone
+lang en_US.UTF-8
+keyboard --xlayouts='us'
+timezone UTC --utc
+
+# Partition clearing information
+autopart
+clearpart --none --initlabel
+
+# Root password
+rootpw --plaintext xvmroot
+# User account.
+# The kickstart creates only `xdev`. The container overlay (stage 2) adds
+# `xsup`, `magaox`, and `magaox-dev` by merging entries out of the container's
+# /etc/{passwd,group,shadow,gshadow}; everything else is preserved from this
+# desktop install. Creating `xdev` here keeps the first non-system UID (1000)
+# for the desktop's own user, so the container's `xsup` lands on UID 1001
+# without colliding.
+# dialout - needed for USB passthru
+user --groups=wheel,dialout --name=xdev --plaintext --password=xdev --gecos="MagAO-X User"
+
+%post --erroronfail
+echo 'In post-install script...' > /dev/kmsg
+yum clean all
+
+# Passwordless sudo for the user 'xdev'
+echo "xdev ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/xdev_in_vm_passwordless
+chmod 440 /etc/sudoers.d/xdev_in_vm_passwordless
+
+# Set up auto-login
+cat <<'HERE' | sudo tee -a /etc/sddm.conf
+[Autologin]
+User=xdev
+Session=plasma
+HERE
+
+# Disable KDE welcome screen
+sudo -u xdev kwriteconfig5 --file plasma-welcomerc --group General --key LastSeenVersion 5.27.11
+sudo -u xdev kwriteconfig5 --file plasma-welcomerc --group General --key ShouldShow false
+
+# Disable all screen locking
+sudo -u xdev kwriteconfig5 --file kscreenlockerrc --group Daemon --key Autolock false
+sudo -u xdev kwriteconfig5 --file kscreenlockerrc --group Daemon --key LockOnResume false
+cat <<'HERE' | sudo -u xdev tee -a /home/xdev/.config/powermanagementprofilesrc
+[AC]
+icon=battery-charging
+HERE
+
+# Boot to desktop
+sudo systemctl enable sddm
+sudo systemctl set-default graphical.target
+
+# Disable sleep and hibernation
+mkdir -p /etc/systemd/sleep.conf.d
+cat <<'HERE' | sudo tee /etc/systemd/sleep.conf.d/disable-suspend.conf
+[Sleep]
+AllowSuspend=no
+AllowHibernation=no
+AllowHybridSleep=no
+AllowSuspendThenHibernate=no
+HERE
+
+# Install SSH key (using include from pre-install script)
+sudo -u xdev mkdir -m0700 /home/xdev/.ssh/
+echo "$sshPublicKey" > /home/xdev/.ssh/authorized_keys
+chown xdev:xdev /home/xdev/.ssh/authorized_keys
+sudo -u xdev chmod 0600 /home/xdev/.ssh/authorized_keys
+# Restore SELinux context
+restorecon -R /home/xdev/.ssh/
+
+# Disable KDE connect because it's not useful and pops up errors on boot
+dnf -y remove kde-connect kde-connectd kde-connect-libs kde-connect-nautilus --noautoremove
+%end
+
+%packages
+@^minimal-environment
+@kde-desktop
+@development
+firefox
+kate
+git
+qemu-guest-agent
+spice-vdagent
+cloud-init
+mlocate
+age
+vim
+nano
+wget
+htop
+nmap-ncat
+dialog
+autossh
+tmux
+bc
+chrony
+gdb
+yum-utils
+strace
+sysstat
+fuse
+psmisc
+podman
+nethogs
+nfs-utils
+rsync
+python
+%end
+
+# Do not start the Inital Setup app
+firstboot --disable
+
+# Turn off after installation
+poweroff

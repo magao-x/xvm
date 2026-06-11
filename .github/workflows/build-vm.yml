@@ -1,0 +1,400 @@
+name: Build MagAO-X VM
+
+# Storage = GitHub Actions artifacts (10 GB per-artifact, no 2 GiB per-file cap).
+# Retention = 90 days; we re-upload before that to avoid expiry annoyance.
+#
+# Three jobs:
+#   triage   resolves magaox:gui digest, decides build / refresh / noop.
+#   refresh  copies an existing-but-aging artifact onto a new run, resetting
+#            its 90-day clock. No qemu, no rebuild.
+#   build    full stage 0..2 + bundle, gated by the stage 1 cache.
+#
+# Cache = a single 8.4 GB stage1 entry (xvm_stage1.qcow2 + firmware + keypair),
+# fitting well under the repo's 10 GB cache budget.
+
+on:
+  schedule:
+    # Daily at 06:00 UTC.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      vm_arch:
+        description: VM architecture
+        type: choice
+        options: [aarch64, x86_64]
+        default: aarch64
+      force_rebuild:
+        description: Rebuild from scratch even if a matching artifact exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: write  # create / delete releases (asset-less, used as a stable /releases/latest pointer)
+  packages: read
+  actions: write   # list / upload / delete artifacts
+
+concurrency:
+  group: build-vm-${{ inputs.vm_arch || 'aarch64' }}
+  cancel-in-progress: false
+
+env:
+  ARTIFACT_RETENTION_DAYS: 90
+  REFRESH_WHEN_OLDER_THAN_DAYS: 80
+
+jobs:
+  triage:
+    name: Triage (${{ inputs.vm_arch || 'aarch64' }})
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.decide.outputs.mode }}
+      vm_arch: ${{ steps.envout.outputs.vm_arch }}
+      digest: ${{ steps.digest.outputs.digest }}
+      digest_short: ${{ steps.digest.outputs.short }}
+      artifact_name: ${{ steps.digest.outputs.artifact_name }}
+      previous_run_id: ${{ steps.lookup.outputs.run_id }}
+      previous_artifact_id: ${{ steps.lookup.outputs.artifact_id }}
+      stage1_cache_key: ${{ steps.keys.outputs.stage1 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve env
+        id: envout
+        run: echo "vm_arch=${{ inputs.vm_arch || 'aarch64' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install skopeo
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
+
+      - name: Resolve magaox:gui digest
+        id: digest
+        env:
+          vmArch: ${{ steps.envout.outputs.vm_arch }}
+        run: |
+          case "$vmArch" in
+            aarch64) arch=arm64 ;;
+            x86_64)  arch=amd64 ;;
+            *) echo "::error::unknown arch $vmArch"; exit 1 ;;
+          esac
+          digest=$(skopeo inspect --override-arch "$arch" \
+              docker://ghcr.io/magao-x/magaox:gui --format '{{.Digest}}')
+          slug=${digest#sha256:}
+          short=${slug:0:12}
+          echo "Resolved magaox:gui ($arch) -> $digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "slug=$slug"     >> "$GITHUB_OUTPUT"
+          echo "short=$short"   >> "$GITHUB_OUTPUT"
+          echo "artifact_name=magao-x-vm-${vmArch}-${short}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute stage 1 cache key
+        id: keys
+        env:
+          vmArch: ${{ steps.envout.outputs.vm_arch }}
+        run: |
+          hash() { sha256sum "$@" | sha256sum | awk '{print $1}'; }
+          stage1_h=$(hash _common.sh build_vm_stage0.sh build_vm_stage1.sh \
+                          create_kickstart.sh create_rocky_iso.sh \
+                          download_firmware.sh mkksisowrap.sh \
+                          create_oemdrv.sh kickstart/ks.cfg.template)
+          echo "stage1=vm-${vmArch}-stage1-${stage1_h}" >> "$GITHUB_OUTPUT"
+
+      - name: Look up existing artifact
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: ${{ steps.digest.outputs.artifact_name }}
+        run: |
+          # Newest non-expired artifact with our digest-tagged name.
+          json=$(gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+                  --jq ".artifacts[] | select(.name == \"$ARTIFACT_NAME\" and .expired == false)" \
+                | jq -s 'sort_by(.created_at) | reverse | .[0] // empty')
+
+          if [[ -z "$json" ]]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No existing artifact named $ARTIFACT_NAME."
+            exit 0
+          fi
+
+          created_at=$(echo "$json" | jq -r '.created_at')
+          age_days=$(python3 -c '
+          import sys, datetime as d
+          t = d.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00"))
+          print((d.datetime.now(d.timezone.utc) - t).days)
+          ' "$created_at")
+          run_id=$(echo "$json" | jq -r '.workflow_run.id')
+          artifact_id=$(echo "$json" | jq -r '.id')
+
+          echo "Found $ARTIFACT_NAME (age=${age_days}d, run=$run_id, id=$artifact_id)"
+          echo "exists=true"          >> "$GITHUB_OUTPUT"
+          echo "age_days=$age_days"   >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id"       >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Decide mode
+        id: decide
+        env:
+          force: ${{ inputs.force_rebuild }}
+          exists: ${{ steps.lookup.outputs.exists }}
+          age: ${{ steps.lookup.outputs.age_days }}
+          threshold: ${{ env.REFRESH_WHEN_OLDER_THAN_DAYS }}
+        run: |
+          if [[ "$force" == "true" ]]; then
+            mode=build
+            echo "::notice::force_rebuild=true → full rebuild"
+          elif [[ "$exists" != "true" ]]; then
+            mode=build
+            echo "::notice::No matching artifact → full rebuild"
+          elif [[ "$age" -ge "$threshold" ]]; then
+            mode=refresh
+            echo "::notice::Artifact is ${age}d old (≥ ${threshold}d) → refresh, no rebuild"
+          else
+            mode=noop
+            echo "::notice::Artifact is ${age}d old; still fresh → no-op"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize
+        if: always()
+        env:
+          mode: ${{ steps.decide.outputs.mode }}
+          digest: ${{ steps.digest.outputs.digest }}
+          artifact: ${{ steps.digest.outputs.artifact_name }}
+          run_id: ${{ steps.lookup.outputs.run_id }}
+          age: ${{ steps.lookup.outputs.age_days }}
+        run: |
+          {
+            echo "### Triage"
+            echo
+            echo "- mode: \`$mode\`"
+            echo "- container: \`$digest\`"
+            echo "- artifact: \`$artifact\`"
+            if [[ -n "$run_id" ]]; then
+              echo "- existing artifact in [run #$run_id](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/$run_id) (${age}d old)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  refresh:
+    name: Refresh artifact
+    needs: triage
+    if: needs.triage.outputs.mode == 'refresh'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download previous artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p refresh-stage
+          gh run download "${{ needs.triage.outputs.previous_run_id }}" \
+              -R "$GITHUB_REPOSITORY" \
+              -n "${{ needs.triage.outputs.artifact_name }}" \
+              -D refresh-stage
+          ls -lah refresh-stage/
+
+      - name: Re-upload with fresh retention
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.triage.outputs.artifact_name }}
+          path: refresh-stage/**
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Delete stale copy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X DELETE \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${{ needs.triage.outputs.previous_artifact_id }}"
+
+      - name: Publish release pointing to this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: vm-${{ needs.triage.outputs.vm_arch }}-${{ needs.triage.outputs.digest_short }}
+          VM_ARCH: ${{ needs.triage.outputs.vm_arch }}
+          DIGEST: ${{ needs.triage.outputs.digest }}
+          DIGEST_SHORT: ${{ needs.triage.outputs.digest_short }}
+          ARTIFACT_NAME: ${{ needs.triage.outputs.artifact_name }}
+        run: |
+          # Replace any existing release at this tag so the notes link the
+          # current (refresh) run, where the un-expired artifact now lives.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --cleanup-tag --yes
+          fi
+          if [[ "$VM_ARCH" == aarch64 ]]; then
+            HINT="**Use this build if you're on an Apple Silicon Mac (M1/M2/M3/M4).** The artifact contains a UTM bundle (\`MagAO-X.utm\`) — open it with [UTM.app](https://mac.getutm.app/)."
+          else
+            HINT="**Use this build if you're on an Intel or AMD x86_64 host (Linux or Windows).** The artifact contains a qcow2 disk image (\`xvm.qcow2\`) — boot it with QEMU."
+          fi
+          gh release create "$TAG" \
+              --title "MagAO-X VM (${VM_ARCH}) — ${DIGEST_SHORT}" \
+              --latest \
+              --notes "Built from \`ghcr.io/magao-x/magaox:gui\` @ \`${DIGEST}\`.
+
+          ${HINT}
+
+          **Download the VM bundle from this run's artifacts page:**
+          ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          The artifact is named \`${ARTIFACT_NAME}\`. Artifacts are retained
+          for 90 days; this release will be re-pointed at a fresher run
+          before that window closes."
+
+      - name: Prune old releases (keep last 3 per arch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VM_ARCH: ${{ needs.triage.outputs.vm_arch }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt \
+            | jq -r --arg p "vm-${VM_ARCH}-" '
+                [.[] | select(.tagName | startswith($p))]
+                | sort_by(.createdAt) | reverse | .[3:] | .[].tagName
+              ' \
+            | while read -r tag; do
+                [[ -z "$tag" ]] && continue
+                echo "Deleting old release $tag"
+                gh release delete "$tag" --cleanup-tag --yes
+              done
+
+      - name: Summarize
+        if: always()
+        env:
+          name: ${{ needs.triage.outputs.artifact_name }}
+        run: |
+          {
+            echo "### Refresh"
+            echo
+            echo "Re-uploaded \`$name\` (no rebuild). 90-day clock reset."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build VM (${{ needs.triage.outputs.vm_arch }})
+    needs: triage
+    if: needs.triage.outputs.mode == 'build'
+    runs-on: macos-latest
+    timeout-minutes: 720
+    env:
+      vmArch: ${{ needs.triage.outputs.vm_arch }}
+      magaoxContainerImage: ghcr.io/magao-x/magaox:gui
+      anacondaInstallKind: cmdline
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install qemu xorriso podman skopeo jq coreutils
+          podman machine init --cpus 3 --memory 8192 --disk-size 80 2>/dev/null || true
+          podman machine start || true
+
+      - name: Restore stage 1 cache
+        id: cache_stage1
+        uses: actions/cache@v4
+        with:
+          key: ${{ needs.triage.outputs.stage1_cache_key }}
+          path: |
+            output/xvm_stage1.qcow2
+            output/xvm_key
+            output/xvm_key.pub
+            output/firmware_code.fd
+            output/firmware_vars.fd
+
+      - name: Pre-pull container image
+        run: podman pull "$magaoxContainerImage"
+
+      - name: Stage 0 (ISO + firmware + keypair)
+        if: steps.cache_stage1.outputs.cache-hit != 'true'
+        run: bash -x build_vm_stage0.sh
+
+      - name: Stage 1 (Rocky + KDE install)
+        if: steps.cache_stage1.outputs.cache-hit != 'true'
+        run: bash -x build_vm_stage1.sh
+
+      - name: Stage 2 (overlay magaox:gui)
+        run: bash -x build_vm_stage2.sh
+
+      - name: Bundle for distribution
+        run: |
+          rm -rf ./output/bundle
+          if [[ $vmArch == aarch64 ]]; then
+            bash -x bundle_utm.sh
+          else
+            bash -x bundle_qcow2.sh
+          fi
+          ls -lah ./output/bundle/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.triage.outputs.artifact_name }}
+          path: output/bundle/**
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Delete previous artifact (if any)
+        if: needs.triage.outputs.previous_artifact_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X DELETE \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${{ needs.triage.outputs.previous_artifact_id }}" \
+            || echo "::warning::Could not delete previous artifact (already gone?)"
+
+      - name: Publish release pointing to this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: vm-${{ needs.triage.outputs.vm_arch }}-${{ needs.triage.outputs.digest_short }}
+          VM_ARCH: ${{ needs.triage.outputs.vm_arch }}
+          DIGEST: ${{ needs.triage.outputs.digest }}
+          DIGEST_SHORT: ${{ needs.triage.outputs.digest_short }}
+          ARTIFACT_NAME: ${{ needs.triage.outputs.artifact_name }}
+        run: |
+          # Replace any existing release at this tag (only happens with
+          # force_rebuild) so notes link this run.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --cleanup-tag --yes
+          fi
+          if [[ "$VM_ARCH" == aarch64 ]]; then
+            HINT="**Use this build if you're on an Apple Silicon Mac (M1/M2/M3/M4).** The artifact contains a UTM bundle (\`MagAO-X.utm\`) — open it with [UTM.app](https://mac.getutm.app/)."
+          else
+            HINT="**Use this build if you're on an Intel or AMD x86_64 host (Linux or Windows).** The artifact contains a qcow2 disk image (\`xvm.qcow2\`) — boot it with QEMU."
+          fi
+          gh release create "$TAG" \
+              --title "MagAO-X VM (${VM_ARCH}) — ${DIGEST_SHORT}" \
+              --latest \
+              --notes "Built from \`ghcr.io/magao-x/magaox:gui\` @ \`${DIGEST}\`.
+
+          ${HINT}
+
+          **Download the VM bundle from this run's artifacts page:**
+          ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          The artifact is named \`${ARTIFACT_NAME}\`. Artifacts are retained
+          for 90 days; this release will be re-pointed at a fresher run
+          before that window closes."
+
+      - name: Prune old releases (keep last 3 per arch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VM_ARCH: ${{ needs.triage.outputs.vm_arch }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt \
+            | jq -r --arg p "vm-${VM_ARCH}-" '
+                [.[] | select(.tagName | startswith($p))]
+                | sort_by(.createdAt) | reverse | .[3:] | .[].tagName
+              ' \
+            | while read -r tag; do
+                [[ -z "$tag" ]] && continue
+                echo "Deleting old release $tag"
+                gh release delete "$tag" --cleanup-tag --yes
+              done
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### Build"
+            echo
+            echo "- arch: \`$vmArch\`"
+            echo "- container: \`${{ needs.triage.outputs.digest }}\`"
+            echo "- artifact: \`${{ needs.triage.outputs.artifact_name }}\`"
+            echo "- stage1 cache: \`${{ steps.cache_stage1.outputs.cache-hit || 'miss' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
