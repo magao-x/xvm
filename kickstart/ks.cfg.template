@@ -51,7 +51,7 @@ chmod 440 /etc/sudoers.d/xdev_in_vm_passwordless
 # Set up auto-login
 cat <<'HERE' | sudo tee -a /etc/sddm.conf
 [Autologin]
-User=xdev
+User=xsup
 Session=plasma
 HERE
 

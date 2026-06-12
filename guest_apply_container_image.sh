@@ -112,6 +112,67 @@ for f in /boot/loader/entries/*.conf; do
     fi
 done
 
+mkdir -p /etc/xdg
+
+# Disable KDE's "Switch User" / start-new-session actions. Triggering a new
+# SDDM session locks up the VM (virtio_gpu doesn't handle multi-seat handoff
+# well). The `[$i]` suffix marks the entries immutable from user config.
+if ! grep -q '^# xvm: kiosk action restrictions$' /etc/xdg/kdeglobals 2>/dev/null; then
+    cat >> /etc/xdg/kdeglobals <<'KIOSK_EOF'
+
+# xvm: kiosk action restrictions
+[KDE Action Restrictions][$i]
+action/start_new_session=false
+action/switch_user=false
+KIOSK_EOF
+fi
+
+# Apply the same KDE convenience defaults the kickstart sets for xdev — but
+# system-wide via /etc/xdg/ so xsup (and any future user) inherits them too.
+# Plasma layers user-level ~/.config files on top of these, so users can still
+# override if they want.
+cat > /etc/xdg/plasma-welcomerc <<'PWR_EOF'
+[General]
+LastSeenVersion=5.27.11
+ShouldShow=false
+PWR_EOF
+cat > /etc/xdg/kscreenlockerrc <<'KSL_EOF'
+[Daemon]
+Autolock=false
+LockOnResume=false
+KSL_EOF
+cat > /etc/xdg/powermanagementprofilesrc <<'PMP_EOF'
+[AC]
+icon=battery-charging
+PMP_EOF
+
+# Make SDDM autologin xsup instead of xdev. The kickstart writes the file
+# during stage 1 (when only xdev exists) so it still says User=xdev there —
+# this catches existing stage 1 images so we don't have to rebuild.
+sed -i 's/^User=xdev$/User=xsup/' /etc/sddm.conf 2>/dev/null || true
+
+# The container's /etc/profile.d/magaox_role.sh has `MAGAOX_ROLE=workstation`
+# without an `export`, so login shells set the variable locally but child
+# processes don't inherit it. Re-emit with export, and mirror to
+# /etc/environment so PAM (and thus the SDDM/KDE session env) picks it up too.
+if [[ -f /etc/profile.d/magaox_role.sh ]]; then
+    sed -i 's/^\(MAGAOX_ROLE=\)/export \1/' /etc/profile.d/magaox_role.sh
+    role=$(awk -F= '/^export MAGAOX_ROLE=/ {print $2; exit}' /etc/profile.d/magaox_role.sh)
+    if [[ -n $role ]] && ! grep -q '^MAGAOX_ROLE=' /etc/environment 2>/dev/null; then
+        echo "MAGAOX_ROLE=$role" >> /etc/environment
+    fi
+fi
+
+# Pre-populate ~/.ssh/known_hosts + ~/.ssh/config for xdev and xsup with the
+# exao1/exao2/exao3 host keys + aliases, so the user can ssh from the VM
+# without TOFU prompts. Script lives in the container's MagAOX setup tree.
+sshConfigure=/opt/MagAOX/source/magao-x-setup/configure_system/configure_ssh_for_workstations.sh
+if [[ -f $sshConfigure ]]; then
+    bash "$sshConfigure" || echo "WARN: $sshConfigure exited non-zero"
+else
+    echo "WARN: $sshConfigure not found in container — skipping known_hosts prepopulation"
+fi
+
 # Compaction (lifted from the old stage 4).
 dnf clean all -y || true
 rm -rf /var/cache/dnf
