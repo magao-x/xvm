@@ -281,8 +281,17 @@ jobs:
       - name: Install build dependencies
         run: |
           brew install qemu xorriso podman skopeo jq coreutils
-          podman machine init --cpus 3 --memory 8192 --disk-size 80 2>/dev/null || true
-          podman machine start || true
+          # GH macOS runners are tight on RAM (~7 GB on macos-14, ~14 GB on
+          # macos-15) and have ~14 GB SSD, so don't ask for more than we need.
+          # 4 GB RAM leaves room alongside the stage-2 QEMU (8 GB) on the
+          # larger runners; --disk-size 30 fits the magaox:gui pull (~8 GB
+          # compressed, ~17 GB decompressed) with headroom. Failures here are
+          # not silenced — if podman machine init/start can't bring up the
+          # backend, the rest of the build will fail confusingly, so we'd
+          # rather fail loudly right here.
+          podman machine init --cpus 3 --memory 4096 --disk-size 30
+          podman machine start
+          podman info >/dev/null
 
       - name: Restore stage 1 cache
         id: cache_stage1
