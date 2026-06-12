@@ -265,9 +265,60 @@ jobs:
             echo "Re-uploaded \`$name\` (no rebuild). 90-day clock reset."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  stage0:
+    name: Stage 0 — ISO + firmware + keypair (${{ needs.triage.outputs.vm_arch }})
+    needs: triage
+    if: needs.triage.outputs.mode == 'build'
+    runs-on: ubuntu-latest
+    # mkksiso / lorax / rpm2archive only run on Linux. GH macOS runners can't
+    # get hardware virt (Apple VF blocked) so we can't usefully run them under
+    # podman on the macOS runner — run them in a real Linux container instead.
+    container:
+      image: rockylinux:9
+    timeout-minutes: 60
+    env:
+      vmArch: ${{ needs.triage.outputs.vm_arch }}
+      anacondaInstallKind: cmdline
+    outputs:
+      stage1_cache_hit: ${{ steps.cache_lookup.outputs.cache-hit }}
+    steps:
+      - name: Install build dependencies (in rockylinux:9 container)
+        run: |
+          dnf -y install lorax xorriso openssh-clients gettext curl python3 rpm tar gzip findutils git
+      - uses: actions/checkout@v4
+      - name: Look up stage 1 cache
+        id: cache_lookup
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ needs.triage.outputs.stage1_cache_key }}
+          path: |
+            output/xvm_stage1.qcow2
+            output/xvm_key
+            output/xvm_key.pub
+            output/firmware_code.fd
+            output/firmware_vars.fd
+          lookup-only: true
+      - name: Build ISO + firmware + keypair
+        if: steps.cache_lookup.outputs.cache-hit != 'true'
+        run: bash -x build_vm_stage0.sh
+      - name: Upload stage 0 outputs
+        if: steps.cache_lookup.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage0-outputs-${{ needs.triage.outputs.vm_arch }}
+          path: |
+            output/Rocky-9-${{ needs.triage.outputs.vm_arch }}-unattended.iso
+            output/firmware_code.fd
+            output/firmware_vars.fd
+            output/xvm_key
+            output/xvm_key.pub
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+
   build:
     name: Build VM (${{ needs.triage.outputs.vm_arch }})
-    needs: triage
+    needs: [triage, stage0]
     if: needs.triage.outputs.mode == 'build'
     runs-on: macos-latest
     timeout-minutes: 720
@@ -280,18 +331,10 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install qemu xorriso podman skopeo jq coreutils
-          # GH macOS runners are tight on RAM (~7 GB on macos-14, ~14 GB on
-          # macos-15) and have ~14 GB SSD, so don't ask for more than we need.
-          # 4 GB RAM leaves room alongside the stage-2 QEMU (8 GB) on the
-          # larger runners; --disk-size 30 fits the magaox:gui pull (~8 GB
-          # compressed, ~17 GB decompressed) with headroom. Failures here are
-          # not silenced — if podman machine init/start can't bring up the
-          # backend, the rest of the build will fail confusingly, so we'd
-          # rather fail loudly right here.
-          podman machine init --cpus 3 --memory 4096 --disk-size 30
-          podman machine start
-          podman info >/dev/null
+          # crane (go-containerregistry) handles the container pull+flatten in
+          # stage 2; pure Go, no VM backend needed (the macOS GH runner has no
+          # virt access, which is why we can't use podman/Docker Desktop here).
+          brew install qemu xorriso crane jq coreutils
 
       - name: Restore stage 1 cache
         id: cache_stage1
@@ -305,12 +348,16 @@ jobs:
             output/firmware_code.fd
             output/firmware_vars.fd
 
-      - name: Pre-pull container image
-        run: podman pull "$magaoxContainerImage"
-
-      - name: Stage 0 (ISO + firmware + keypair)
+      - name: Download stage 0 outputs
         if: steps.cache_stage1.outputs.cache-hit != 'true'
-        run: bash -x build_vm_stage0.sh
+        uses: actions/download-artifact@v4
+        with:
+          name: stage0-outputs-${{ needs.triage.outputs.vm_arch }}
+          path: output/
+
+      - name: Tighten SSH key perms
+        if: steps.cache_stage1.outputs.cache-hit != 'true'
+        run: chmod 0600 output/xvm_key
 
       - name: Stage 1 (Rocky + KDE install)
         if: steps.cache_stage1.outputs.cache-hit != 'true'

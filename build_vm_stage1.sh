@@ -18,17 +18,11 @@ fi
 # make disk drive image
 qemu-img create -f qcow2 output/xvm.qcow2 64G
 
-echo "download firmware for EFI boot"
-bash download_firmware.sh
-
-if [[ $vmArch == aarch64 ]]; then
-    echo "Using AAVMF (ARM) firmware"
-    cp ./input/firmware/usr/share/AAVMF/AAVMF_VARS.fd ./output/firmware_vars.fd
-    cp ./input/firmware/usr/share/AAVMF/AAVMF_CODE.fd ./output/firmware_code.fd
-else
-    echo "Using OVMF (x86_64) firmware"
-    cp ./input/firmware/usr/share/edk2/ovmf/OVMF_VARS.fd ./output/firmware_vars.fd
-    cp ./input/firmware/usr/share/edk2/ovmf/OVMF_CODE.fd ./output/firmware_code.fd
+# Stage 0 is responsible for ./output/firmware_{code,vars}.fd; bail loudly if
+# they're missing so we don't trip over it inside qemu later.
+if [[ ! -e ./output/firmware_code.fd || ! -e ./output/firmware_vars.fd ]]; then
+    echo "Firmware files missing in ./output/; run build_vm_stage0.sh first."
+    exit 1
 fi
 
 echo "Starting VM installation process..."

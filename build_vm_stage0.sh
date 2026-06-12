@@ -18,8 +18,23 @@ bash create_kickstart.sh || exit 1
 echo "download ISO and insert kickstart file"
 bash create_rocky_iso.sh || exit 1
 
+echo "download firmware for EFI boot"
+bash download_firmware.sh
+
+if [[ $vmArch == aarch64 ]]; then
+    echo "Using AAVMF (ARM) firmware"
+    cp ./input/firmware/usr/share/AAVMF/AAVMF_VARS.fd ./output/firmware_vars.fd
+    cp ./input/firmware/usr/share/AAVMF/AAVMF_CODE.fd ./output/firmware_code.fd
+else
+    echo "Using OVMF (x86_64) firmware"
+    cp ./input/firmware/usr/share/edk2/ovmf/OVMF_VARS.fd ./output/firmware_vars.fd
+    cp ./input/firmware/usr/share/edk2/ovmf/OVMF_CODE.fd ./output/firmware_code.fd
+fi
+
 du -hs ./output/Rocky-9-${vmArch}-unattended.iso \
+    ./output/firmware_vars.fd \
+    ./output/firmware_code.fd \
     ./output/xvm_key \
     ./output/xvm_key.pub
 
-echo "Finished creating the unattended Rocky install ISO and SSH keypair"
+echo "Finished creating the unattended Rocky install ISO, firmware, and SSH keypair"

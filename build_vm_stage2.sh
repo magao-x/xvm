@@ -16,15 +16,29 @@ fi
 
 : "${magaoxContainerImage:?magaoxContainerImage must be set (e.g. magaox:gui)}"
 
-# Make sure the host has the image locally — pull only if it's missing AND
-# looks like a registry-qualified name. A bare 'name:tag' that resolves to a
-# local-only image is fine to use as-is.
-if ! podman image exists "$magaoxContainerImage"; then
-    echo "Image $magaoxContainerImage not present locally; attempting podman pull..."
-    podman pull "$magaoxContainerImage" || {
-        echo "Could not find $magaoxContainerImage locally or in a registry."
-        exit 1
-    }
+# Pick a container tool. Prefer `crane` (pure-Go, no VM backend needed — works
+# on macOS GitHub runners where Apple Virt Framework is unavailable). Fall
+# back to `podman` for local dev / contexts where it's already set up.
+if command -v crane >/dev/null 2>&1; then
+    containerTool=crane
+elif command -v podman >/dev/null 2>&1; then
+    containerTool=podman
+else
+    echo "Neither crane nor podman found; install one to run stage 2."
+    exit 1
+fi
+echo "Using $containerTool for container image extraction"
+
+if [[ $containerTool == podman ]]; then
+    # Local image (e.g. 'magaox:gui') is fine; pull only if missing AND
+    # looks registry-qualified.
+    if ! podman image exists "$magaoxContainerImage"; then
+        echo "Image $magaoxContainerImage not present locally; attempting podman pull..."
+        podman pull "$magaoxContainerImage" || {
+            echo "Could not find $magaoxContainerImage locally or in a registry."
+            exit 1
+        }
+    fi
 fi
 
 $qemuSystemCommand &
@@ -38,18 +52,37 @@ fi
 
 sshOpts="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i ./output/xvm_key"
 
-echo "Creating container so we can extract its /etc/ identity files..."
-cid=$(podman create "$magaoxContainerImage")
-trap 'podman rm -f "$cid" >/dev/null 2>&1 || true' EXIT
-
+echo "Staging container's /etc/ identity files for merge..."
 stagingDir=$(mktemp -d)
-for stem in passwd group shadow gshadow; do
-    if podman cp "$cid:/etc/$stem" "$stagingDir/container_etc_$stem" 2>/dev/null; then
-        echo "extracted /etc/$stem from container"
-    else
-        echo "WARN: container has no /etc/$stem — skipping"
-    fi
-done
+if [[ $containerTool == podman ]]; then
+    cid=$(podman create "$magaoxContainerImage")
+    trap 'podman rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+    for stem in passwd group shadow gshadow; do
+        if podman cp "$cid:/etc/$stem" "$stagingDir/container_etc_$stem" 2>/dev/null; then
+            echo "extracted /etc/$stem from container"
+        else
+            echo "WARN: container has no /etc/$stem — skipping"
+        fi
+    done
+else
+    # crane has no `cp`; just export the whole thing once into a small temp tar
+    # and pluck the identity files out. The full export streams through ssh below.
+    craneTmp=$(mktemp -d)
+    trap 'rm -rf "$craneTmp"' EXIT
+    # `crane export` writes a flat rootfs tar to stdout; tar -x extracts only
+    # the etc paths we care about.
+    crane export "$magaoxContainerImage" - \
+        | tar -C "$craneTmp" -x etc/passwd etc/group etc/shadow etc/gshadow 2>/dev/null \
+        || true
+    for stem in passwd group shadow gshadow; do
+        if [[ -f $craneTmp/etc/$stem ]]; then
+            cp "$craneTmp/etc/$stem" "$stagingDir/container_etc_$stem"
+            echo "extracted /etc/$stem from container"
+        else
+            echo "WARN: container has no /etc/$stem — skipping"
+        fi
+    done
+fi
 
 echo "Copying overlay script + container identity files into guest..."
 # Retry a few times in case sshd isn't quite ready yet. NB: scp uses -P (capital)
@@ -70,10 +103,17 @@ echo "Flattening container $magaoxContainerImage and streaming overlay into gues
 # which kills sshd mid-session, so ssh exits non-zero ("Connection closed by
 # remote host"). The real success signal is QEMU shutting down cleanly below.
 set +e
-podman export "$cid" | ssh -p $guestPort $sshOpts xdev@localhost \
-    'sudo bash /tmp/guest_apply_container_image.sh'
+if [[ $containerTool == podman ]]; then
+    podman export "$cid" | ssh -p $guestPort $sshOpts xdev@localhost \
+        'sudo bash /tmp/guest_apply_container_image.sh'
+else
+    crane export "$magaoxContainerImage" - | ssh -p $guestPort $sshOpts xdev@localhost \
+        'sudo bash /tmp/guest_apply_container_image.sh'
+fi
 set -e
-podman rm -f "$cid"
+if [[ $containerTool == podman ]]; then
+    podman rm -f "$cid"
+fi
 trap - EXIT
 
 # guest_apply_container_image.sh ends with `systemctl poweroff` — wait for QEMU.
