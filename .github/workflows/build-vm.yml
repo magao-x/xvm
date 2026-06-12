@@ -283,8 +283,9 @@ jobs:
       stage1_cache_hit: ${{ steps.cache_lookup.outputs.cache-hit }}
     steps:
       - name: Install build dependencies (in rockylinux:9 container)
-        run: |
-          dnf -y install lorax xorriso openssh-clients gettext curl python3 rpm tar gzip findutils git
+        # curl-minimal is preinstalled and conflicts with the full curl
+        # package; python3/rpm/tar/gzip/findutils are already in the image.
+        run: dnf -y install lorax xorriso openssh-clients gettext git
       - uses: actions/checkout@v4
       - name: Look up stage 1 cache
         id: cache_lookup
