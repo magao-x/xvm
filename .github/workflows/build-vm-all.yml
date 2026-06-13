@@ -1,0 +1,45 @@
+name: Build MagAO-X VM (all arches)
+
+# Fan-out entrypoint: invokes build-vm.yml once per arch in parallel.
+# Use this for the scheduled daily run and for "rebuild everything" manual
+# dispatches. To rebuild a single arch, dispatch build-vm.yml directly with
+# the desired vm_arch input.
+
+on:
+  schedule:
+    # Daily at 06:00 UTC.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild from scratch even if a matching artifact exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: write  # release create/delete in the called workflow
+  packages: read
+  actions: write   # list / upload / delete artifacts
+
+jobs:
+  aarch64:
+    name: aarch64
+    uses: ./.github/workflows/build-vm.yml
+    permissions:
+      contents: write
+      packages: read
+      actions: write
+    with:
+      vm_arch: aarch64
+      force_rebuild: ${{ inputs.force_rebuild || false }}
+
+  x86_64:
+    name: x86_64
+    uses: ./.github/workflows/build-vm.yml
+    permissions:
+      contents: write
+      packages: read
+      actions: write
+    with:
+      vm_arch: x86_64
+      force_rebuild: ${{ inputs.force_rebuild || false }}

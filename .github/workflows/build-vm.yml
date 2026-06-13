@@ -13,9 +13,6 @@ name: Build MagAO-X VM
 # fitting well under the repo's 10 GB cache budget.
 
 on:
-  schedule:
-    # Daily at 06:00 UTC.
-    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       vm_arch:
@@ -25,6 +22,18 @@ on:
         default: aarch64
       force_rebuild:
         description: Rebuild from scratch even if a matching artifact exists
+        type: boolean
+        default: false
+  workflow_call:
+    # Same input names as workflow_dispatch so `inputs.vm_arch` works for both
+    # paths. The scheduled / "build both arches" entrypoint lives in
+    # build-vm-all.yml and invokes this workflow once per arch in parallel.
+    inputs:
+      vm_arch:
+        required: true
+        type: string
+      force_rebuild:
+        required: false
         type: boolean
         default: false
 
@@ -331,6 +340,11 @@ jobs:
       vmArch: ${{ needs.triage.outputs.vm_arch }}
       magaoxContainerImage: ghcr.io/magao-x/magaox:gui
       anacondaInstallKind: cmdline
+      # Temporarily skip stage 2 and everything downstream (bundle, upload,
+      # release, prune) so stage 1 cache warmup iterations don't pay the
+      # multi-hour stage 2 cost. Flip to 'false' (or remove this var) to
+      # re-enable the full pipeline.
+      STAGE1_WARMUP_ONLY: 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -369,9 +383,11 @@ jobs:
         run: bash -x build_vm_stage1.sh
 
       - name: Stage 2 (overlay magaox:gui)
+        if: env.STAGE1_WARMUP_ONLY != 'true'
         run: bash -x build_vm_stage2.sh
 
       - name: Bundle for distribution
+        if: env.STAGE1_WARMUP_ONLY != 'true'
         run: |
           rm -rf ./output/bundle
           if [[ $vmArch == aarch64 ]]; then
@@ -382,6 +398,7 @@ jobs:
           ls -lah ./output/bundle/
 
       - name: Upload artifact
+        if: env.STAGE1_WARMUP_ONLY != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.triage.outputs.artifact_name }}
@@ -391,7 +408,7 @@ jobs:
           compression-level: 0
 
       - name: Delete previous artifact (if any)
-        if: needs.triage.outputs.previous_artifact_id != ''
+        if: env.STAGE1_WARMUP_ONLY != 'true' && needs.triage.outputs.previous_artifact_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -400,6 +417,7 @@ jobs:
             || echo "::warning::Could not delete previous artifact (already gone?)"
 
       - name: Publish release pointing to this run
+        if: env.STAGE1_WARMUP_ONLY != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: vm-${{ needs.triage.outputs.vm_arch }}-${{ needs.triage.outputs.digest_short }}
@@ -433,6 +451,7 @@ jobs:
           before that window closes."
 
       - name: Prune old releases (keep last 3 per arch)
+        if: env.STAGE1_WARMUP_ONLY != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VM_ARCH: ${{ needs.triage.outputs.vm_arch }}
