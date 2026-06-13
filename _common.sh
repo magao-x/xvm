@@ -49,7 +49,7 @@ ramMB=8192
 
 if [[ -n "$CI" ]]; then
     # Find an almost-certainly-unused port to give QEMU
-    guestPort=$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
+    guestPort=$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
 else
     guestPort=2201
 fi
