@@ -4,7 +4,12 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 source $DIR/_common.sh
 
 mkdir -p ./input/iso ./input/kickstart
-ISO_FILE=Rocky-9-latest-${vmArch}-minimal.iso
+# DVD ISO bundles BaseOS + AppStream packages (incl. @kde-desktop), so the
+# anaconda install fetches them from cdrom instead of paying for ~2 GB of
+# remote downloads over an emulated network on a TCG-aarch64 guest. The DVD
+# is ~13 GB vs the minimal's ~2.5 GB; stage 0 (Linux runner) eats the bigger
+# download once, then ships the rebuilt unattended ISO via artifact.
+ISO_FILE=Rocky-9-latest-${vmArch}-dvd.iso
 maxAttempts=10
 attempt=1
 if [[ ! -e ./input/iso/${ISO_FILE} ]]; then
@@ -24,7 +29,7 @@ if [[ ! -e ./input/iso/${ISO_FILE} ]]; then
         exit 1
     fi
 else
-    echo "Rocky Linux ${vmArch} minimal ISO already downloaded."
+    echo "Rocky Linux ${vmArch} DVD ISO already downloaded."
 fi
 
 if [[ ! -e ./input/iso/${ISO_FILE}.CHECKSUM ]]; then
@@ -37,7 +42,7 @@ if [[ ! -e ./input/iso/${ISO_FILE}.CHECKSUM ]]; then
     fi
     # NOTE: not verifying the checksum (yet), just printing it into the log for diagnostic use
 else
-    echo "Rocky Linux ${vmArch} minimal ISO checksum already downloaded."
+    echo "Rocky Linux ${vmArch} DVD ISO checksum already downloaded."
 fi
 
 

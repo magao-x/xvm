@@ -40,6 +40,16 @@ rootpw --plaintext xvmroot
 # dialout - needed for USB passthru
 user --groups=wheel,dialout --name=xdev --plaintext --password=xdev --gecos="MagAO-X User"
 
+%pre --interpreter=/bin/bash
+# Crank up dnf's parallel downloads so the @kde-desktop package fetch isn't
+# bottlenecked on dnf's default of 3. Anaconda's dnf reads /etc/dnf/dnf.conf
+# from the install environment, so writing this here before %packages runs
+# applies to the install fetch as well as future dnfs inside the installed
+# system. (The default dnf.conf already has a [main] section, so we just
+# append the key.)
+echo 'max_parallel_downloads=20' >> /etc/dnf/dnf.conf
+%end
+
 %post --erroronfail
 echo 'In post-install script...' > /dev/kmsg
 yum clean all
@@ -96,7 +106,6 @@ dnf -y remove kde-connect kde-connectd kde-connect-libs kde-connect-nautilus --n
 %packages
 @^minimal-environment
 @kde-desktop
-@development
 firefox
 kate
 git
