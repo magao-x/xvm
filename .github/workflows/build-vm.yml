@@ -269,10 +269,14 @@ jobs:
     name: Stage 0 — ISO + firmware + keypair (${{ needs.triage.outputs.vm_arch }})
     needs: triage
     if: needs.triage.outputs.mode == 'build'
-    runs-on: ubuntu-latest
-    # mkksiso / lorax / rpm2archive only run on Linux. GH macOS runners can't
-    # get hardware virt (Apple VF blocked) so we can't usefully run them under
-    # podman on the macOS runner — run them in a real Linux container instead.
+    # mkksiso refuses to rebuild an ISO whose arch differs from the host arch
+    # (a safety check, even with --skip-mkefiboot). Pick a runner that matches
+    # vm_arch. GH offers free arm64 Linux runners (ubuntu-*-arm) for public
+    # repos; x86_64 uses the default ubuntu-latest.
+    runs-on: ${{ needs.triage.outputs.vm_arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    # mkksiso / lorax / rpm2archive only run on Linux. Run them in a real
+    # Linux container of the matching arch (Docker pulls the manifest matching
+    # the runner's arch automatically).
     container:
       image: rockylinux:9
     timeout-minutes: 60
