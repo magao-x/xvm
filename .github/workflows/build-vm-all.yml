@@ -15,6 +15,10 @@ on:
         description: Rebuild from scratch even if a matching artifact exists
         type: boolean
         default: false
+      stage1_warmup_only:
+        description: Skip stage 2 + bundle/upload/release (just warm the stage 1 cache)
+        type: boolean
+        default: false
 
 permissions:
   contents: write  # release create/delete in the called workflow
@@ -32,6 +36,7 @@ jobs:
     with:
       vm_arch: aarch64
       force_rebuild: ${{ inputs.force_rebuild || false }}
+      stage1_warmup_only: ${{ inputs.stage1_warmup_only || false }}
 
   x86_64:
     name: x86_64
@@ -43,3 +48,4 @@ jobs:
     with:
       vm_arch: x86_64
       force_rebuild: ${{ inputs.force_rebuild || false }}
+      stage1_warmup_only: ${{ inputs.stage1_warmup_only || false }}
