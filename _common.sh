@@ -66,8 +66,10 @@ elif [[ $vmArch == x86_64 ]]; then
     elif [[ -x /usr/libexec/qemu-kvm ]]; then
         qemuSystemCommand="/usr/libexec/qemu-kvm"
     else
-        echo "Could not find qemu executable for ${vmArch}"
-        exit 1
+        # Don't fail here — _common.sh is sourced by stage 0 (which doesn't
+        # touch qemu, just builds an ISO). Stages 1/2 will exec this and fail
+        # loudly at runtime if it's actually missing.
+        qemuSystemCommand="qemu-system-${vmArch}"
     fi
 else
     echo 'set $vmArch'
