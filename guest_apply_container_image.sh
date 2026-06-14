@@ -24,22 +24,18 @@ exec > /dev/console 2>&1
 
 # Flatten and overlay at /. See header for exclusion rationale.
 #
-# bsdtar (from libarchive) instead of GNU tar: crane export emits hardlink
-# entries before their target file in the stream (e.g. /opt/conda/lib/.../X
-# as a hardlink to /opt/conda/envs/xpy3_13/.../X which hasn't been extracted
-# yet), and GNU tar errors then bails the whole extract with "Unexpected EOF
-# in archive". bsdtar buffers pending hardlinks until their target appears.
-# Rocky 9 has the binary in a package called `bsdtar` (not libarchive).
-which bsdtar >/dev/null 2>&1 || dnf install -y bsdtar
-# Ignore bsdtar's exit code: it reports each missing hardlink-target as an
-# error and exits non-zero at the end ("Error exit delayed from previous
-# errors"), but the regular-file entries all extract correctly — and crane's
-# out-of-order hardlinks are deduplicated copies of files under
-# /opt/conda/envs/xpy3_13/... that DO get extracted as regular files later in
-# the stream, so we'd only lose duplicate /opt/conda/lib/ and /opt/conda/pkgs/
-# entries which MagAO-X doesn't use at runtime. Sanity-check that /opt/MagAOX
-# actually landed after extraction so we catch a genuinely empty extract.
-bsdtar -C / -xpf - \
+# Ignore tar's exit code: crane export emits hardlink entries before their
+# linked-to file (e.g. /opt/conda/lib/.../X as a hardlink to
+# /opt/conda/envs/xpy3_13/.../X which hasn't been extracted yet), and tar
+# logs "Cannot hard link to ...: No such file or directory" for each one and
+# exits non-zero at the end — but the regular-file entries all extract
+# correctly. The "missing" hardlink sources are deduplicated copies of files
+# under /opt/conda/envs/xpy3_13/... that DO land as regular files later in
+# the stream, so we only lose duplicate /opt/conda/lib/ and /opt/conda/pkgs/
+# entries that MagAO-X doesn't use at runtime. Sanity-check that
+# /opt/MagAOX/source/MagAOX actually landed so we catch a genuinely-empty
+# extract instead of silently producing a broken VM.
+tar -C / -xpf - \
     --exclude='boot' --exclude='boot/*' \
     --exclude='lib/modules' --exclude='lib/modules/*' \
     --exclude='usr/lib/modules' --exclude='usr/lib/modules/*' \
@@ -54,7 +50,7 @@ bsdtar -C / -xpf - \
     --exclude='etc/ssh/ssh_host_*' \
     --exclude='etc/sddm.conf' --exclude='etc/sddm.conf.d/*' \
     --exclude='home/xdev/.ssh/authorized_keys' \
-    || echo "bsdtar exited non-zero (likely out-of-order hardlinks); continuing"
+    || echo "tar exited non-zero (likely out-of-order hardlinks); continuing"
 if [[ ! -d /opt/MagAOX/source/MagAOX ]]; then
     echo "FATAL: /opt/MagAOX/source/MagAOX missing after extraction"
     exit 1
