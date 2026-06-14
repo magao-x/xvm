@@ -133,6 +133,16 @@ LC_ALL=C tr -d '\000-\010\013-\037' < "$stage2SerialLog" 2>/dev/null \
     | tail -120 || true
 echo "=== end of guest serial log tail ==="
 
+# If the overlay didn't reach its terminal sentinel, bail fast — otherwise the
+# wait-for-poweroff loop sits idle for its full 30-min cap on a guest that's
+# just running normally (the overlay errored before calling poweroff).
+if ! grep -q 'XVM-OVERLAY-COMPLETE' "$stage2SerialLog" 2>/dev/null; then
+    echo "Overlay did not reach the XVM-OVERLAY-COMPLETE sentinel — aborting."
+    kill $qemuPid 2>/dev/null || true
+    wait $qemuPid 2>/dev/null || true
+    exit 1
+fi
+
 # guest_apply_container_image.sh ends with `systemctl poweroff` — wait for QEMU.
 # Bound the wait so a hung guest doesn't deadlock the script forever. On
 # TCG-emulated aarch64 the full systemd shutdown can take 10-15 min after the

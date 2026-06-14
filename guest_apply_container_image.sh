@@ -217,5 +217,10 @@ rm -f /EMPTY
 echo "Trimming again..."
 fstrim -av || true
 
+# Sentinel for the host to grep out of the serial log: anything before this
+# line means the overlay aborted mid-way. The host uses this to decide
+# whether to wait for QEMU to power off or fail fast with the serial log.
+echo "XVM-OVERLAY-COMPLETE"
+
 # Caller waits on the QEMU pid; we power ourselves off here.
 systemctl poweroff
