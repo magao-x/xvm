@@ -16,15 +16,29 @@ fi
 
 : "${magaoxContainerImage:?magaoxContainerImage must be set (e.g. magaox:gui)}"
 
-# Pick a container tool. Prefer `crane` (pure-Go, no VM backend needed — works
-# on macOS GitHub runners where Apple Virt Framework is unavailable). Fall
-# back to `podman` for local dev / contexts where it's already set up.
-if command -v crane >/dev/null 2>&1; then
-    containerTool=crane
+# Pick a container tool.
+#
+# Prefer ocirender (https://github.com/edera-dev/ocirender) — it streams OCI
+# image layers through a proper overlay-merge engine: deferred hardlinks,
+# whiteout/opaque-whiteout handling, no on-disk extraction. crane's flat
+# export emits hardlink entries before their targets, which tar refuses;
+# podman export works but needs a Linux VM that the macOS GH runner can't
+# spin up without Apple Virt Framework access. ocirender solves both.
+#
+# Fall back to podman for local dev where it's already set up and the
+# image may be a local-only tag (e.g. magaox:gui pulled into the host
+# podman storage, not in any registry yet).
+if command -v ocirender >/dev/null 2>&1; then
+    containerTool=ocirender
+    case "$vmArch" in
+        aarch64) ociArch=arm64 ;;
+        x86_64)  ociArch=amd64 ;;
+        *) echo "Unknown vmArch=$vmArch for ocirender platform mapping" >&2; exit 1 ;;
+    esac
 elif command -v podman >/dev/null 2>&1; then
     containerTool=podman
 else
-    echo "Neither crane nor podman found; install one to run stage 2."
+    echo "Neither ocirender nor podman found; install one to run stage 2."
     exit 1
 fi
 echo "Using $containerTool for container image extraction"
@@ -59,9 +73,10 @@ sshOpts="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i ./output
 
 echo "Staging container's /etc/ identity files for merge..."
 stagingDir=$(mktemp -d)
+trap 'rm -rf "$stagingDir"' EXIT
 if [[ $containerTool == podman ]]; then
     cid=$(podman create "$magaoxContainerImage")
-    trap 'podman rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+    trap 'podman rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$stagingDir"' EXIT
     for stem in passwd group shadow gshadow; do
         if podman cp "$cid:/etc/$stem" "$stagingDir/container_etc_$stem" 2>/dev/null; then
             echo "extracted /etc/$stem from container"
@@ -70,26 +85,31 @@ if [[ $containerTool == podman ]]; then
         fi
     done
 else
-    # crane has no `cp`; just export the whole thing once into a small temp tar
-    # and pluck the identity files out. The full export streams through ssh below.
-    craneTmp=$(mktemp -d)
-    trap 'rm -rf "$craneTmp"' EXIT
-    # `crane export` writes a flat rootfs tar to stdout; tar -x extracts only
-    # the etc paths we care about.
-    crane export "$magaoxContainerImage" - \
-        | tar -C "$craneTmp" -x etc/passwd etc/group etc/shadow etc/gshadow 2>/dev/null \
-        || true
+    # ocirender writes its progress 'Done: ...' line to its own stdout AFTER
+    # the tar bytes, so we can't use `--output-tar /dev/stdout | tar -x`
+    # without corrupting the stream. Route the tar bytes through a FIFO so
+    # ocirender's stdout chatter goes to our log, not into the consumer.
+    etcFifo="$stagingDir/etc.fifo"
+    mkfifo "$etcFifo"
+    ocirender pull --image "$magaoxContainerImage" --platform "linux/$ociArch" \
+        --output-tar "$etcFifo" &
+    ociEtcPid=$!
+    tar -C "$stagingDir" -x etc/passwd etc/group etc/shadow etc/gshadow < "$etcFifo" \
+        2>/dev/null || true
+    wait $ociEtcPid || true
+    rm -f "$etcFifo"
     # /etc/gshadow lands with mode 0000 (container convention) which leaves it
     # unreadable to the non-root user that extracted it; force +r before `cp`.
-    chmod -R u+r "$craneTmp" 2>/dev/null || true
+    chmod -R u+r "$stagingDir/etc" 2>/dev/null || true
     for stem in passwd group shadow gshadow; do
-        if [[ -f $craneTmp/etc/$stem ]]; then
-            cp "$craneTmp/etc/$stem" "$stagingDir/container_etc_$stem"
+        if [[ -f "$stagingDir/etc/$stem" ]]; then
+            mv "$stagingDir/etc/$stem" "$stagingDir/container_etc_$stem"
             echo "extracted /etc/$stem from container"
         else
             echo "WARN: container has no /etc/$stem — skipping"
         fi
     done
+    rm -rf "$stagingDir/etc"
 fi
 
 echo "Copying overlay script + container identity files into guest..."
@@ -104,7 +124,6 @@ for i in 1 2 3 4 5; do
     echo "scp attempt $i failed, retrying in 5s..."
     sleep 5
 done
-rm -rf "$stagingDir"
 
 echo "Flattening container $magaoxContainerImage and streaming overlay into guest..."
 # Ignore the SSH exit code: the overlay script ends with `systemctl poweroff`,
@@ -115,14 +134,22 @@ if [[ $containerTool == podman ]]; then
     podman export "$cid" | ssh -p $guestPort $sshOpts xdev@localhost \
         'sudo bash /tmp/guest_apply_container_image.sh'
 else
-    crane export "$magaoxContainerImage" - | ssh -p $guestPort $sshOpts xdev@localhost \
-        'sudo bash /tmp/guest_apply_container_image.sh'
+    overlayFifo="$stagingDir/overlay.fifo"
+    mkfifo "$overlayFifo"
+    ocirender pull --image "$magaoxContainerImage" --platform "linux/$ociArch" \
+        --output-tar "$overlayFifo" &
+    ociMainPid=$!
+    ssh -p $guestPort $sshOpts xdev@localhost \
+        'sudo bash /tmp/guest_apply_container_image.sh' < "$overlayFifo"
+    wait $ociMainPid || true
+    rm -f "$overlayFifo"
 fi
 set -e
 if [[ $containerTool == podman ]]; then
     podman rm -f "$cid"
 fi
 trap - EXIT
+rm -rf "$stagingDir"
 
 # Dump the guest serial log tail now (not only on poweroff-wait timeout) so
 # every run shows where the in-guest overlay got to.

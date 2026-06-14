@@ -24,17 +24,10 @@ exec > /dev/console 2>&1
 
 # Flatten and overlay at /. See header for exclusion rationale.
 #
-# Ignore tar's exit code: crane export emits hardlink entries before their
-# linked-to file (e.g. /opt/conda/lib/.../X as a hardlink to
-# /opt/conda/envs/xpy3_13/.../X which hasn't been extracted yet), and tar
-# logs "Cannot hard link to ...: No such file or directory" for each one and
-# exits non-zero at the end — but the regular-file entries all extract
-# correctly. The "missing" hardlink sources are deduplicated copies of files
-# under /opt/conda/envs/xpy3_13/... that DO land as regular files later in
-# the stream, so we only lose duplicate /opt/conda/lib/ and /opt/conda/pkgs/
-# entries that MagAO-X doesn't use at runtime. Sanity-check that
-# /opt/MagAOX/source/MagAOX actually landed so we catch a genuinely-empty
-# extract instead of silently producing a broken VM.
+# The host-side stream comes from ocirender, which emits hardlinks AFTER
+# their targets land, so GNU tar can extract without the out-of-order-link
+# failures that crane's flat export produces. We let tar's exit code stay
+# meaningful (no `|| true`); set -e will trip on a real failure.
 tar -C / -xpf - \
     --exclude='boot' --exclude='boot/*' \
     --exclude='lib/modules' --exclude='lib/modules/*' \
@@ -49,8 +42,7 @@ tar -C / -xpf - \
     --exclude='etc/hostname' --exclude='etc/hosts' --exclude='etc/resolv.conf' \
     --exclude='etc/ssh/ssh_host_*' \
     --exclude='etc/sddm.conf' --exclude='etc/sddm.conf.d/*' \
-    --exclude='home/xdev/.ssh/authorized_keys' \
-    || echo "tar exited non-zero (likely out-of-order hardlinks); continuing"
+    --exclude='home/xdev/.ssh/authorized_keys'
 if [[ ! -d /opt/MagAOX/source/MagAOX ]]; then
     echo "FATAL: /opt/MagAOX/source/MagAOX missing after extraction"
     exit 1

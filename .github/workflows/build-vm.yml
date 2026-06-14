@@ -355,10 +355,14 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          # crane (go-containerregistry) handles the container pull+flatten in
-          # stage 2; pure Go, no VM backend needed (the macOS GH runner has no
-          # virt access, which is why we can't use podman/Docker Desktop here).
-          brew install qemu xorriso crane jq coreutils
+          # ocirender handles the OCI flatten in stage 2 with proper hardlink
+          # deferral + whiteout handling, which crane's flat export does NOT —
+          # `crane export` emits hardlink entries before their targets, which
+          # any tar refuses. ocirender isn't on homebrew and has no release
+          # binaries; install from source via cargo. Rust comes from brew.
+          brew install qemu xorriso jq coreutils rust
+          cargo install --locked --git https://github.com/edera-dev/ocirender --tag v0.2.1 ocirender-cli
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Restore stage 1 cache
         id: cache_stage1
