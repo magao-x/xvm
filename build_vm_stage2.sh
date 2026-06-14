@@ -41,7 +41,12 @@ if [[ $containerTool == podman ]]; then
     fi
 fi
 
-$qemuSystemCommand &
+stage2SerialLog=./output/stage2-serial.log
+: > "$stage2SerialLog"
+# Capture the guest's serial console so we can see what the in-guest overlay
+# is doing — ssh without a PTY block-buffers stderr, and the buffer gets lost
+# when sshd is killed by systemctl poweroff, so otherwise we'd be blind.
+$qemuSystemCommand -serial "file:$stage2SerialLog" &
 qemuPid=$!
 echo "Waiting for VM to become ready..."
 sleep 20
@@ -120,15 +125,22 @@ fi
 trap - EXIT
 
 # guest_apply_container_image.sh ends with `systemctl poweroff` — wait for QEMU.
-# Bound the wait so a hung guest doesn't deadlock the script forever.
-for i in $(seq 1 120); do
+# Bound the wait so a hung guest doesn't deadlock the script forever. On
+# TCG-emulated aarch64 the full systemd shutdown can take 10-15 min after the
+# script reaches poweroff, so cap at 30 min.
+for i in $(seq 1 360); do
     if ! kill -0 $qemuPid 2>/dev/null; then
         break
     fi
     sleep 5
 done
 if kill -0 $qemuPid 2>/dev/null; then
-    echo "Guest did not power off within 10 minutes — killing QEMU."
+    echo "Guest did not power off within 30 minutes — killing QEMU."
+    echo "=== last 80 lines of guest serial log ($stage2SerialLog) ==="
+    LC_ALL=C tr -d '\000-\010\013-\037' < "$stage2SerialLog" 2>/dev/null \
+        | LC_ALL=C tr '\r' '\n' \
+        | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\[K//g' \
+        | tail -80 || true
     kill $qemuPid
     wait $qemuPid 2>/dev/null || true
     exit 1
