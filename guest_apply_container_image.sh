@@ -23,7 +23,15 @@ set -xeo pipefail
 exec > /dev/console 2>&1
 
 # Flatten and overlay at /. See header for exclusion rationale.
-tar -C / -xpf - \
+#
+# bsdtar (libarchive) instead of GNU tar: crane export emits hardlink entries
+# before their target file in the stream (e.g. /opt/conda/lib/.../X as a
+# hardlink to /opt/conda/envs/xpy3_13/.../X which hasn't been extracted yet),
+# and GNU tar errors then bails the whole extract with "Unexpected EOF in
+# archive". bsdtar buffers pending hardlinks until their target appears.
+# libarchive is preinstalled on Rocky 9, but ensure it's there just in case.
+which bsdtar >/dev/null 2>&1 || dnf install -y libarchive
+bsdtar -C / -xpf - \
     --exclude='boot' --exclude='boot/*' \
     --exclude='lib/modules' --exclude='lib/modules/*' \
     --exclude='usr/lib/modules' --exclude='usr/lib/modules/*' \
