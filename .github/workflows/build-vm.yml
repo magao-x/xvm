@@ -322,6 +322,29 @@ jobs:
             output/firmware_code.fd
             output/firmware_vars.fd
           lookup-only: true
+      - name: Fetch Rocky DVD ISO checksum (cache key seed)
+        if: steps.cache_lookup.outputs.cache-hit != 'true'
+        id: iso_checksum
+        env:
+          vmArch: ${{ needs.triage.outputs.vm_arch }}
+        run: |
+          # The "latest" filename Rocky publishes is a symlink to the current
+          # point release. The .CHECKSUM file has a stable sha256 per release;
+          # use that as the cache key so we auto-invalidate on Rocky 9.x → 9.y.
+          curl -fsSL "https://download.rockylinux.org/pub/rocky/9/isos/${vmArch}/Rocky-9-latest-${vmArch}-dvd.iso.CHECKSUM" -o /tmp/dvd.CHECKSUM
+          sha=$(awk '/^SHA256.*-dvd.iso\)/ {print $NF; exit}' /tmp/dvd.CHECKSUM)
+          if [[ -z $sha ]]; then
+              echo "Could not extract sha256 from CHECKSUM file"; cat /tmp/dvd.CHECKSUM; exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Rocky DVD sha256: $sha"
+      - name: Restore cached Rocky DVD ISO
+        if: steps.cache_lookup.outputs.cache-hit != 'true'
+        id: iso_cache
+        uses: actions/cache@v4
+        with:
+          key: rocky-dvd-${{ needs.triage.outputs.vm_arch }}-${{ steps.iso_checksum.outputs.sha }}
+          path: input/iso/Rocky-9-latest-${{ needs.triage.outputs.vm_arch }}-dvd.iso
       - name: Build ISO + firmware + keypair
         if: steps.cache_lookup.outputs.cache-hit != 'true'
         run: bash -x build_vm_stage0.sh
@@ -340,9 +363,58 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  container-prep:
+    name: Container prep (${{ needs.triage.outputs.vm_arch }})
+    needs: triage
+    if: needs.triage.outputs.mode == 'build'
+    # Always amd64 Linux runner — podman doesn't need to execute the
+    # container, just `create` + `export` it. We pull --arch={vm_arch} so the
+    # registry returns the right manifest variant; the bytes inside the
+    # container are arch-specific but our host doesn't try to run them.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Install podman
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq podman
+      - name: Pull source container
+        env:
+          IMG: ghcr.io/magao-x/magaox:gui
+          ociArch: ${{ needs.triage.outputs.vm_arch == 'aarch64' && 'arm64' || 'amd64' }}
+        run: podman pull --arch="$ociArch" "$IMG"
+      - name: Export flat rootfs + identity files
+        env:
+          IMG: ghcr.io/magao-x/magaox:gui
+        run: |
+          mkdir -p prep-stage
+          cid=$(podman create "$IMG")
+          # podman export tars the container's flattened rootfs from a real
+          # filesystem, so hardlinks come out in the canonical order
+          # (TypeReg encountered first → TypeLink to it later). No
+          # out-of-order-link issues like crane/ocirender's manifest-based
+          # synthesis.
+          podman export "$cid" -o prep-stage/prep.tar
+          # Identity files for the host-side merge step. /etc/gshadow is mode
+          # 0000 in the container; chmod so we can read it post-copy.
+          for stem in passwd group shadow gshadow; do
+              podman cp "$cid:/etc/$stem" "prep-stage/container_etc_$stem" 2>/dev/null \
+                  && echo "extracted /etc/$stem" \
+                  || echo "WARN: /etc/$stem missing in container — skipping"
+          done
+          chmod u+r prep-stage/container_etc_* 2>/dev/null || true
+          podman rm -f "$cid"
+          ls -lh prep-stage/
+      - name: Upload container-prep artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-prep-${{ needs.triage.outputs.vm_arch }}
+          path: prep-stage/
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+
   build:
     name: Build VM (${{ needs.triage.outputs.vm_arch }})
-    needs: [triage, stage0]
+    needs: [triage, stage0, container-prep]
     if: needs.triage.outputs.mode == 'build'
     runs-on: macos-latest
     timeout-minutes: 720
@@ -355,14 +427,9 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          # ocirender handles the OCI flatten in stage 2 with proper hardlink
-          # deferral + whiteout handling, which crane's flat export does NOT —
-          # `crane export` emits hardlink entries before their targets, which
-          # any tar refuses. ocirender isn't on homebrew and has no release
-          # binaries; install from source via cargo. Rust comes from brew.
-          brew install qemu xorriso jq coreutils rust
-          cargo install --locked --git https://github.com/edera-dev/ocirender --tag v0.2.1 ocirender-cli
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # The container flatten happens on the Linux container-prep job
+          # (where podman is native) — we just need qemu here.
+          brew install qemu xorriso jq coreutils
 
       - name: Restore stage 1 cache
         id: cache_stage1
@@ -391,8 +458,17 @@ jobs:
         if: steps.cache_stage1.outputs.cache-hit != 'true'
         run: bash -x build_vm_stage1.sh
 
+      - name: Download container-prep artifact
+        if: ${{ !inputs.stage1_warmup_only }}
+        uses: actions/download-artifact@v4
+        with:
+          name: container-prep-${{ needs.triage.outputs.vm_arch }}
+          path: prep-stage/
+
       - name: Stage 2 (overlay magaox:gui)
         if: ${{ !inputs.stage1_warmup_only }}
+        env:
+          containerPrepDir: ${{ github.workspace }}/prep-stage
         run: bash -x build_vm_stage2.sh
 
       - name: Bundle for distribution

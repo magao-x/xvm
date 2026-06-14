@@ -24,16 +24,11 @@ exec > /dev/console 2>&1
 
 # Flatten and overlay at /. See header for exclusion rationale.
 #
-# Ignore tar's exit code: ocirender (like crane) emits some hardlink entries
-# before their targets in the merged stream, and GNU tar logs each as
-# "Cannot hard link to ...: No such file or directory" then exits non-zero
-# at end via "Exiting with failure status due to previous errors". The
-# regular-file entries all extract correctly (target files DO land later in
-# the stream), so the only loss is the conda dedup copies under
-# /opt/conda/lib/ and /opt/conda/pkgs/ — which MagAO-X doesn't use at
-# runtime (it runs from /opt/conda/envs/xpy3_13/). Sanity-check that
-# /opt/MagAOX/source/MagAOX actually landed afterwards so a genuinely empty
-# extract still fails loudly.
+# The host-side stream comes from `podman export` (in the container-prep CI
+# job, or local podman for dev), which tars a real flattened filesystem.
+# Hardlinks come out in canonical order (TypeReg first, TypeLink to it
+# later), so GNU tar extracts them cleanly. No `|| true` needed; if tar
+# fails, set -e correctly aborts the script.
 tar -C / -xpf - \
     --exclude='boot' --exclude='boot/*' \
     --exclude='lib/modules' --exclude='lib/modules/*' \
@@ -48,8 +43,7 @@ tar -C / -xpf - \
     --exclude='etc/hostname' --exclude='etc/hosts' --exclude='etc/resolv.conf' \
     --exclude='etc/ssh/ssh_host_*' \
     --exclude='etc/sddm.conf' --exclude='etc/sddm.conf.d/*' \
-    --exclude='home/xdev/.ssh/authorized_keys' \
-    || echo "tar exited non-zero (out-of-order hardlinks); continuing"
+    --exclude='home/xdev/.ssh/authorized_keys'
 if [[ ! -d /opt/MagAOX/source/MagAOX ]]; then
     echo "FATAL: /opt/MagAOX/source/MagAOX missing after extraction"
     exit 1
