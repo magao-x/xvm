@@ -296,7 +296,9 @@ jobs:
     # the runner's arch automatically).
     container:
       image: rockylinux:9
-    timeout-minutes: 60
+    # Downloading the 13 GB Rocky DVD ISO + mkksiso rebuild can comfortably
+    # eat 30-45 min on its own; padding to 180 min so we don't get clipped.
+    timeout-minutes: 180
     env:
       vmArch: ${{ needs.triage.outputs.vm_arch }}
       anacondaInstallKind: cmdline
