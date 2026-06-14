@@ -322,29 +322,6 @@ jobs:
             output/firmware_code.fd
             output/firmware_vars.fd
           lookup-only: true
-      - name: Fetch Rocky DVD ISO checksum (cache key seed)
-        if: steps.cache_lookup.outputs.cache-hit != 'true'
-        id: iso_checksum
-        env:
-          vmArch: ${{ needs.triage.outputs.vm_arch }}
-        run: |
-          # The "latest" filename Rocky publishes is a symlink to the current
-          # point release. The .CHECKSUM file has a stable sha256 per release;
-          # use that as the cache key so we auto-invalidate on Rocky 9.x → 9.y.
-          curl -fsSL "https://download.rockylinux.org/pub/rocky/9/isos/${vmArch}/Rocky-9-latest-${vmArch}-dvd.iso.CHECKSUM" -o /tmp/dvd.CHECKSUM
-          sha=$(awk '/^SHA256.*-dvd.iso\)/ {print $NF; exit}' /tmp/dvd.CHECKSUM)
-          if [[ -z $sha ]]; then
-              echo "Could not extract sha256 from CHECKSUM file"; cat /tmp/dvd.CHECKSUM; exit 1
-          fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Rocky DVD sha256: $sha"
-      - name: Restore cached Rocky DVD ISO
-        if: steps.cache_lookup.outputs.cache-hit != 'true'
-        id: iso_cache
-        uses: actions/cache@v4
-        with:
-          key: rocky-dvd-${{ needs.triage.outputs.vm_arch }}-${{ steps.iso_checksum.outputs.sha }}
-          path: input/iso/Rocky-9-latest-${{ needs.triage.outputs.vm_arch }}-dvd.iso
       - name: Build ISO + firmware + keypair
         if: steps.cache_lookup.outputs.cache-hit != 'true'
         run: bash -x build_vm_stage0.sh
