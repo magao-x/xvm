@@ -124,6 +124,15 @@ if [[ $containerTool == podman ]]; then
 fi
 trap - EXIT
 
+# Dump the guest serial log tail now (not only on poweroff-wait timeout) so
+# every run shows where the in-guest overlay got to.
+echo "=== guest serial log tail right after overlay ssh exit ==="
+LC_ALL=C tr -d '\000-\010\013-\037' < "$stage2SerialLog" 2>/dev/null \
+    | LC_ALL=C tr '\r' '\n' \
+    | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\[K//g' \
+    | tail -120 || true
+echo "=== end of guest serial log tail ==="
+
 # guest_apply_container_image.sh ends with `systemctl poweroff` — wait for QEMU.
 # Bound the wait so a hung guest doesn't deadlock the script forever. On
 # TCG-emulated aarch64 the full systemd shutdown can take 10-15 min after the
