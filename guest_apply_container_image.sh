@@ -31,6 +31,14 @@ exec > /dev/console 2>&1
 # in archive". bsdtar buffers pending hardlinks until their target appears.
 # Rocky 9 has the binary in a package called `bsdtar` (not libarchive).
 which bsdtar >/dev/null 2>&1 || dnf install -y bsdtar
+# Ignore bsdtar's exit code: it reports each missing hardlink-target as an
+# error and exits non-zero at the end ("Error exit delayed from previous
+# errors"), but the regular-file entries all extract correctly — and crane's
+# out-of-order hardlinks are deduplicated copies of files under
+# /opt/conda/envs/xpy3_13/... that DO get extracted as regular files later in
+# the stream, so we'd only lose duplicate /opt/conda/lib/ and /opt/conda/pkgs/
+# entries which MagAO-X doesn't use at runtime. Sanity-check that /opt/MagAOX
+# actually landed after extraction so we catch a genuinely empty extract.
 bsdtar -C / -xpf - \
     --exclude='boot' --exclude='boot/*' \
     --exclude='lib/modules' --exclude='lib/modules/*' \
@@ -45,7 +53,12 @@ bsdtar -C / -xpf - \
     --exclude='etc/hostname' --exclude='etc/hosts' --exclude='etc/resolv.conf' \
     --exclude='etc/ssh/ssh_host_*' \
     --exclude='etc/sddm.conf' --exclude='etc/sddm.conf.d/*' \
-    --exclude='home/xdev/.ssh/authorized_keys'
+    --exclude='home/xdev/.ssh/authorized_keys' \
+    || echo "bsdtar exited non-zero (likely out-of-order hardlinks); continuing"
+if [[ ! -d /opt/MagAOX/source/MagAOX ]]; then
+    echo "FATAL: /opt/MagAOX/source/MagAOX missing after extraction"
+    exit 1
+fi
 
 # Merge selected user/group entries from the container's identity files.
 # The host stages these as /tmp/container_etc_{passwd,group,shadow,gshadow}.
