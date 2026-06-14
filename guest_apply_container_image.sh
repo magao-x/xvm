@@ -15,6 +15,13 @@
 # auth round-trips between overlay and shutdown.
 set -xeo pipefail
 
+# Mirror our trace and progress to /dev/console (which writes to ttyAMA0 /
+# ttyS0 in our QEMU setup) so the host's -serial file: capture sees what
+# we're doing. ssh stderr buffering plus sshd being killed by `systemctl
+# poweroff` at the end of the script otherwise eats the trace before the
+# host can see it. stdin stays untouched — the tar stream is on stdin.
+exec > /dev/console 2>&1
+
 # Flatten and overlay at /. See header for exclusion rationale.
 tar -C / -xpf - \
     --exclude='boot' --exclude='boot/*' \
