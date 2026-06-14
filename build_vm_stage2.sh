@@ -74,6 +74,9 @@ else
     crane export "$magaoxContainerImage" - \
         | tar -C "$craneTmp" -x etc/passwd etc/group etc/shadow etc/gshadow 2>/dev/null \
         || true
+    # /etc/gshadow lands with mode 0000 (container convention) which leaves it
+    # unreadable to the non-root user that extracted it; force +r before `cp`.
+    chmod -R u+r "$craneTmp" 2>/dev/null || true
     for stem in passwd group shadow gshadow; do
         if [[ -f $craneTmp/etc/$stem ]]; then
             cp "$craneTmp/etc/$stem" "$stagingDir/container_etc_$stem"
