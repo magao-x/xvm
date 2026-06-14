@@ -343,7 +343,10 @@ jobs:
   container-prep:
     name: Container prep (${{ needs.triage.outputs.vm_arch }})
     needs: triage
-    if: needs.triage.outputs.mode == 'build'
+    # Skip entirely when we're only warming the stage 1 cache — the container
+    # tarball is consumed by stage 2, which is itself disabled by
+    # stage1_warmup_only.
+    if: needs.triage.outputs.mode == 'build' && !inputs.stage1_warmup_only
     # Always amd64 Linux runner — podman doesn't need to execute the
     # container, just `create` + `export` it. We pull --arch={vm_arch} so the
     # registry returns the right manifest variant; the bytes inside the
@@ -363,7 +366,10 @@ jobs:
           IMG: ghcr.io/magao-x/magaox:gui
         run: |
           mkdir -p prep-stage
-          cid=$(podman create "$IMG")
+          # Pass a dummy command because the magaox:gui image has no default
+          # CMD/ENTRYPOINT — podman create refuses without one even though we
+          # never start the container, just `export` and `cp` from it.
+          cid=$(podman create "$IMG" /bin/true)
           # podman export tars the container's flattened rootfs from a real
           # filesystem, so hardlinks come out in the canonical order
           # (TypeReg encountered first → TypeLink to it later). No
@@ -392,7 +398,14 @@ jobs:
   build:
     name: Build VM (${{ needs.triage.outputs.vm_arch }})
     needs: [triage, stage0, container-prep]
-    if: needs.triage.outputs.mode == 'build'
+    # container-prep is skipped in stage1_warmup_only mode (its output is
+    # consumed by stage 2, which is also skipped) — accept either success
+    # or skipped so this job still runs to warm the stage 1 cache.
+    if: |
+      !cancelled() &&
+      needs.triage.outputs.mode == 'build' &&
+      needs.stage0.result == 'success' &&
+      (needs.container-prep.result == 'success' || needs.container-prep.result == 'skipped')
     runs-on: macos-latest
     timeout-minutes: 720
     env:
